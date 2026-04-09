@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aerofor — Mapa de Subdealers</title>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Turf.js -->
+  <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+
+  <!-- Papa Parse (CSV parser) -->
+  <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f5f5f5;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #header {
+      background: #1a1a2e;
+      color: white;
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    #header h1 {
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      white-space: nowrap;
+    }
+
+    #search-box {
+      display: flex;
+      gap: 8px;
+      flex: 1;
+      max-width: 400px;
+    }
+
+    #search-input {
+      flex: 1;
+      padding: 8px 12px;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      outline: none;
+    }
+
+    #search-btn {
+      padding: 8px 14px;
+      background: #e94560;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      white-space: nowrap;
+    }
+
+    #search-btn:hover { background: #c73652; }
+
+    #map { flex: 1; }
+
+    #status-bar {
+      background: #1a1a2e;
+      color: #aaa;
+      font-size: 12px;
+      padding: 4px 16px;
+      text-align: center;
+    }
+
+    /* Leyenda */
+    .legend {
+      background: white;
+      border-radius: 8px;
+      padding: 12px 16px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+      font-size: 13px;
+      line-height: 2;
+    }
+
+    .legend-title {
+      font-weight: 600;
+      margin-bottom: 4px;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #555;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .legend-color {
+      width: 16px;
+      height: 16px;
+      border-radius: 3px;
+      border: 1px solid rgba(0,0,0,0.2);
+      flex-shrink: 0;
+    }
+
+    /* Popup */
+    .popup-title {
+      font-weight: 700;
+      font-size: 15px;
+      margin-bottom: 8px;
+      color: #1a1a2e;
+      border-bottom: 2px solid #e94560;
+      padding-bottom: 6px;
+    }
+
+    .popup-row {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 4px;
+      font-size: 13px;
+    }
+
+    .popup-label {
+      color: #888;
+      min-width: 80px;
+      flex-shrink: 0;
+    }
+
+    .popup-value {
+      color: #222;
+      font-weight: 500;
+    }
+
+    .popup-value a {
+      color: #e94560;
+      text-decoration: none;
+    }
+
+    .popup-unassigned {
+      color: #aaa;
+      font-style: italic;
+      font-size: 13px;
+      margin-top: 4px;
+    }
+  </style>
+</head>
+<body>
+
+<div id="header">
+  <h1>🌍 Aerofor — Subdealers</h1>
+  <div id="search-box">
+    <input id="search-input" type="text" placeholder="Buscar municipio o código postal..." />
+    <button id="search-btn">Buscar</button>
+  </div>
+</div>
+
+<div id="map"></div>
+<div id="status-bar" id="status">Cargando datos...</div>
+
+<script>
+// ─── CONFIGURACIÓN ───────────────────────────────────────────────────────────
+// Cuando tengas el Sheet publicado, sustituye estas URLs
+const SHEET_PROVINCIAS_URL = 'PENDIENTE_URL_SHEET_PROVINCIAS';
+const SHEET_COMARCAS_URL   = 'PENDIENTE_URL_SHEET_COMARCAS';
+
+const GEOJSON_PROVINCIAS   = 'data/provincias.geojson';
+const GEOJSON_COMARCAS     = 'data/comarcas-agrarias.geojson';
+
+// Campos clave en los GeoJSON
+const CAMPO_PROVINCIA = 'Texto';        // campo nombre en provincias.geojson
+const CAMPO_COMARCA   = 'DS_COMARCA';  // campo nombre en comarcas-agrarias.geojson
+const CAMPO_COD_COMARCA = 'CO_COMARCA';
+
+// Colores
+const COLOR = {
+  asignado:   { fill: '#2ecc71', border: '#27ae60' },
+  colindante: { fill: '#f39c12', border: '#d68910' },
+  sin_asignar:{ fill: '#e74c3c', border: '#c0392b' },
+  comarca:    { fill: '#3498db', border: '#2980b9' },
+  neutro:     { fill: '#bdc3c7', border: '#95a5a6' }
+};
+
+// ─── ESTADO ──────────────────────────────────────────────────────────────────
+let datosProvincias = {};   // { "Álava": { Subdealer, Contacto, ... } }
+let datosComarcas   = {};   // { "COSTERA": { ... } }
+let geojsonProvincias = null;
+let capaCoberturaActiva = false;
+let layerProvincias, layerCobertura, layerComarcas;
+
+// ─── MAPA ─────────────────────────────────────────────────────────────────────
+const map = L.map('map', { zoomControl: true }).setView([40.4, -3.7], 6);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '© OpenStreetMap contributors',
+  maxZoom: 18
+}).addTo(map);
+
+// ─── LEYENDA ──────────────────────────────────────────────────────────────────
+const legend = L.control({ position: 'bottomleft' });
+legend.onAdd = () => {
+  const div = L.DomUtil.create('div', 'legend');
+  div.innerHTML = `
+    <div class="legend-title">Cobertura</div>
+    <div class="legend-item"><div class="legend-color" style="background:${COLOR.asignado.fill}"></div> Con subdealer</div>
+    <div class="legend-item"><div class="legend-color" style="background:${COLOR.colindante.fill}"></div> Zona colindante</div>
+    <div class="legend-item"><div class="legend-color" style="background:${COLOR.sin_asignar.fill}"></div> Sin asignar</div>
+    <div class="legend-item"><div class="legend-color" style="background:${COLOR.comarca.fill}"></div> Excepción comarca</div>
+  `;
+  return div;
+};
+
+// ─── CONTROL DE CAPAS ────────────────────────────────────────────────────────
+// Se inicializa después de cargar los GeoJSON
+
+// ─── CARGA DE DATOS ──────────────────────────────────────────────────────────
+function setStatus(msg) {
+  document.getElementById('status-bar').textContent = msg;
+}
+
+// Carga datos del Sheet (o usa vacío si no está configurado)
+async function cargarDatosSheet() {
+  // Si no hay URL configurada, devuelve objetos vacíos
+  if (SHEET_PROVINCIAS_URL === 'PENDIENTE_URL_SHEET_PROVINCIAS') {
+    setStatus('Sheet no configurado — mostrando mapa sin datos de asignación');
+    return;
+  }
+
+  try {
+    const [resP, resC] = await Promise.all([
+      fetch(SHEET_PROVINCIAS_URL),
+      fetch(SHEET_COMARCAS_URL)
+    ]);
+
+    const csvP = await resP.text();
+    const csvC = await resC.text();
+
+    Papa.parse(csvP, {
+      header: true, skipEmptyLines: true,
+      complete: (r) => {
+        r.data.forEach(row => {
+          if (row.Provincia) datosProvincias[row.Provincia.trim()] = row;
+        });
+      }
+    });
+
+    Papa.parse(csvC, {
+      header: true, skipEmptyLines: true,
+      complete: (r) => {
+        r.data.forEach(row => {
+          if (row.Comarca) datosComarcas[row.Comarca.trim()] = row;
+        });
+      }
+    });
+
+    setStatus('Datos cargados correctamente');
+  } catch (e) {
+    setStatus('Error cargando Sheet — comprueba las URLs');
+    console.error(e);
+  }
+}
+
+// ─── LÓGICA DE COLORES ────────────────────────────────────────────────────────
+function calcularColindantes(geojson) {
+  const asignadas = new Set();
+  geojson.features.forEach(f => {
+    const nombre = f.properties[CAMPO_PROVINCIA];
+    if (datosProvincias[nombre]?.Subdealer?.trim()) asignadas.add(nombre);
+  });
+
+  const colindantes = new Set();
+  geojson.features.forEach(f => {
+    const nombre = f.properties[CAMPO_PROVINCIA];
+    if (asignadas.has(nombre)) return;
+    geojson.features.forEach(g => {
+      if (!asignadas.has(g.properties[CAMPO_PROVINCIA])) return;
+      try {
+        if (turf.booleanIntersects(f, g)) colindantes.add(nombre);
+      } catch(e) {}
+    });
+  });
+
+  return { asignadas, colindantes };
+}
+
+function colorProvincia(nombre, asignadas, colindantes) {
+  if (asignadas.has(nombre))   return COLOR.asignado;
+  if (colindantes.has(nombre)) return COLOR.colindante;
+  return COLOR.sin_asignar;
+}
+
+// ─── POPUP ───────────────────────────────────────────────────────────────────
+function popupProvincia(nombre) {
+  const d = datosProvincias[nombre];
+  if (!d || !d.Subdealer?.trim()) {
+    return `<div class="popup-title">${nombre}</div>
+            <div class="popup-unassigned">Sin subdealer asignado</div>`;
+  }
+  return `
+    <div class="popup-title">${nombre}</div>
+    ${d.Subdealer   ? `<div class="popup-row"><span class="popup-label">Subdealer</span><span class="popup-value">${d.Subdealer}</span></div>` : ''}
+    ${d.Contacto    ? `<div class="popup-row"><span class="popup-label">Contacto</span><span class="popup-value">${d.Contacto}</span></div>` : ''}
+    ${d.Teléfono    ? `<div class="popup-row"><span class="popup-label">Teléfono</span><span class="popup-value"><a href="tel:${d.Teléfono}">${d.Teléfono}</a></span></div>` : ''}
+    ${d.Email       ? `<div class="popup-row"><span class="popup-label">Email</span><span class="popup-value"><a href="mailto:${d.Email}">${d.Email}</a></span></div>` : ''}
+    ${d.Cultivos_Principales ? `<div class="popup-row"><span class="popup-label">Cultivos</span><span class="popup-value">${d.Cultivos_Principales}</span></div>` : ''}
+    ${d.Notas       ? `<div class="popup-row"><span class="popup-label">Notas</span><span class="popup-value">${d.Notas}</span></div>` : ''}
+  `;
+}
+
+function popupComarca(props) {
+  const nombre = props[CAMPO_COMARCA];
+  const d = datosComarcas[nombre];
+  const provincia = props['DS_PROVINC'] || '';
+  if (!d || !d.Subdealer?.trim()) {
+    return `<div class="popup-title">${nombre}</div>
+            <div class="popup-row"><span class="popup-label">Provincia</span><span class="popup-value">${provincia}</span></div>
+            <div class="popup-unassigned">Sin excepción comarcal</div>`;
+  }
+  return `
+    <div class="popup-title">${nombre}</div>
+    <div class="popup-row"><span class="popup-label">Provincia</span><span class="popup-value">${provincia}</span></div>
+    ${d.Subdealer ? `<div class="popup-row"><span class="popup-label">Subdealer</span><span class="popup-value">${d.Subdealer}</span></div>` : ''}
+    ${d.Contacto  ? `<div class="popup-row"><span class="popup-label">Contacto</span><span class="popup-value">${d.Contacto}</span></div>` : ''}
+    ${d.Teléfono  ? `<div class="popup-row"><span class="popup-label">Teléfono</span><span class="popup-value"><a href="tel:${d.Teléfono}">${d.Teléfono}</a></span></div>` : ''}
+    ${d.Email     ? `<div class="popup-row"><span class="popup-label">Email</span><span class="popup-value"><a href="mailto:${d.Email}">${d.Email}</a></span></div>` : ''}
+    ${d.Notas     ? `<div class="popup-row"><span class="popup-label">Notas</span><span class="popup-value">${d.Notas}</span></div>` : ''}
+  `;
+}
+
+// ─── RENDERIZAR CAPAS ─────────────────────────────────────────────────────────
+function renderizarCapas(geoProv, geoComarc) {
+  const { asignadas, colindantes } = calcularColindantes(geoProv);
+
+  // Capa provincias (gris neutro, siempre visible)
+  layerProvincias = L.geoJSON(geoProv, {
+    style: () => ({
+      fillColor: COLOR.neutro.fill,
+      fillOpacity: 0.4,
+      color: COLOR.neutro.border,
+      weight: 1.5
+    }),
+    onEachFeature: (feature, layer) => {
+      const nombre = feature.properties[CAMPO_PROVINCIA];
+      layer.on('click', () => layer.bindPopup(popupProvincia(nombre), { maxWidth: 280 }).openPopup());
+      layer.on('mouseover', () => layer.setStyle({ fillOpacity: 0.7 }));
+      layer.on('mouseout',  () => layer.setStyle({ fillOpacity: 0.4 }));
+    }
+  }).addTo(map);
+
+  // Capa cobertura (colores, off por defecto)
+  layerCobertura = L.geoJSON(geoProv, {
+    style: (feature) => {
+      const nombre = feature.properties[CAMPO_PROVINCIA];
+      const c = colorProvincia(nombre, asignadas, colindantes);
+      return { fillColor: c.fill, fillOpacity: 0.55, color: c.border, weight: 1.5 };
+    },
+    onEachFeature: (feature, layer) => {
+      const nombre = feature.properties[CAMPO_PROVINCIA];
+      layer.on('click', () => layer.bindPopup(popupProvincia(nombre), { maxWidth: 280 }).openPopup());
+      layer.on('mouseover', () => layer.setStyle({ fillOpacity: 0.8 }));
+      layer.on('mouseout',  () => {
+        const c = colorProvincia(nombre, asignadas, colindantes);
+        layer.setStyle({ fillColor: c.fill, fillOpacity: 0.55 });
+      });
+    }
+  }); // NO se añade al mapa todavía
+
+  // Capa comarcas (overlay, off por defecto)
+  layerComarcas = L.geoJSON(geoComarc, {
+    style: () => ({
+      fillColor: COLOR.comarca.fill,
+      fillOpacity: 0.15,
+      color: COLOR.comarca.border,
+      weight: 0.8,
+      dashArray: '4 4'
+    }),
+    onEachFeature: (feature, layer) => {
+      layer.on('click', () => layer.bindPopup(popupComarca(feature.properties), { maxWidth: 280 }).openPopup());
+    }
+  }); // NO se añade al mapa todavía
+
+  // Control de capas
+  const overlays = {
+    'Provincias': layerProvincias,
+    '🎨 Cobertura (verde/naranja/rojo)': layerCobertura,
+    '🌾 Comarcas agrarias': layerComarcas
+  };
+  L.control.layers(null, overlays, { collapsed: false, position: 'topright' }).addTo(map);
+  legend.addTo(map);
+
+  setStatus('Mapa listo · Activa capas desde el panel superior derecho');
+}
+
+// ─── BÚSQUEDA ────────────────────────────────────────────────────────────────
+async function buscar() {
+  const query = document.getElementById('search-input').value.trim();
+  if (!query) return;
+
+  setStatus(`Buscando "${query}"...`);
+
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query + ', España')}&format=json&limit=1&countrycodes=es`;
+    const res = await fetch(url, { headers: { 'Accept-Language': 'es' } });
+    const data = await res.json();
+
+    if (!data.length) { setStatus('No se encontró el municipio o código postal'); return; }
+
+    const { lat, lon, display_name } = data[0];
+    const point = turf.point([parseFloat(lon), parseFloat(lat)]);
+
+    map.setView([lat, lon], 9);
+    L.marker([lat, lon]).addTo(map).bindPopup(`<b>${display_name.split(',')[0]}</b>`).openPopup();
+
+    // Identificar provincia
+    if (geojsonProvincias) {
+      for (const feature of geojsonProvincias.features) {
+        try {
+          if (turf.booleanPointInPolygon(point, feature)) {
+            const nombre = feature.properties[CAMPO_PROVINCIA];
+            setStatus(`Provincia: ${nombre}`);
+            break;
+          }
+        } catch(e) {}
+      }
+    }
+  } catch(e) {
+    setStatus('Error en la búsqueda — comprueba tu conexión');
+  }
+}
+
+document.getElementById('search-btn').addEventListener('click', buscar);
+document.getElementById('search-input').addEventListener('keydown', e => { if (e.key === 'Enter') buscar(); });
+
+// ─── INICIALIZACIÓN ───────────────────────────────────────────────────────────
+async function init() {
+  setStatus('Cargando GeoJSON...');
+  try {
+    const [resP, resC] = await Promise.all([
+      fetch(GEOJSON_PROVINCIAS),
+      fetch(GEOJSON_COMARCAS)
+    ]);
+    geojsonProvincias = await resP.json();
+    const geojsonComarcas = await resC.json();
+
+    await cargarDatosSheet();
+    renderizarCapas(geojsonProvincias, geojsonComarcas);
+  } catch(e) {
+    setStatus('Error cargando archivos — comprueba que los GeoJSON están en /data/');
+    console.error(e);
+  }
+}
+
+init();
+</script>
+</body>
+</html>
