@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aerofor — Mapa de Subdealers</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/@turf/turf@6.5.0/turf.min.js"></script>
+  <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; height: 100vh; display: flex; flex-direction: column; }
+
+    #header { background: #0f1923; color: white; padding: 10px 16px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+    #header img { height: 36px; width: auto; }
+    #header-title { font-size: 15px; font-weight: 600; color: #e0e0e0; white-space: nowrap; }
+    #search-box { display: flex; gap: 8px; flex: 1; max-width: 420px; margin-left: auto; }
+    #search-input { flex: 1; padding: 8px 12px; border: 1px solid #2e4a5e; border-radius: 6px; font-size: 14px; outline: none; background: #1e2d3d; color: white; }
+    #search-input::placeholder { color: #7a9bb5; }
+    #search-btn { padding: 8px 16px; background: #4caf50; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 600; }
+    #search-btn:hover { background: #388e3c; }
+
+    #map { flex: 1; }
+    #status-bar { background: #0f1923; color: #7a9bb5; font-size: 12px; padding: 5px 16px; text-align: center; }
+
+    /* Leyenda */
+    .legend { background: white; border-radius: 6px; padding: 7px 11px; box-shadow: 0 2px 8px rgba(0,0,0,0.2); font-size: 11px; line-height: 1.8; }
+    .legend-title { font-weight: 700; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: #555; margin-bottom: 2px; }
+    .legend-item { display: flex; align-items: center; gap: 6px; }
+    .legend-color { width: 12px; height: 12px; border-radius: 2px; border: 1px solid rgba(0,0,0,0.15); flex-shrink: 0; }
+
+    /* Botón volver a España */
+    .reset-btn { background: white; border: none; border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,0.2); color: #333; font-weight: 600; white-space: nowrap; }
+    .reset-btn:hover { background: #f5f5f5; }
+
+    /* Popup */
+    .popup-wrap { min-width: 220px; max-width: 280px; }
+    .popup-municipio { font-size: 16px; font-weight: 700; color: #0f1923; margin-bottom: 2px; }
+    .popup-cp { font-size: 12px; color: #888; margin-bottom: 8px; }
+    .popup-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 700; margin-bottom: 10px; letter-spacing: 0.3px; }
+    .badge-asignado { background: #e8f5e9; color: #2e7d32; }
+    .badge-sin-asignar { background: #fce4ec; color: #c62828; }
+    .popup-divider { border: none; border-top: 1px solid #f0f0f0; margin: 8px 0; }
+    .popup-field { font-size: 13px; color: #222; margin-bottom: 4px; line-height: 1.4; }
+    .popup-field a { color: #4caf50; text-decoration: none; }
+    .popup-geo { font-size: 11px; color: #999; margin-top: 8px; line-height: 1.6; }
+    .popup-geo strong { color: #666; font-weight: 600; }
+  </style>
+</head>
+<body>
+
+<div id="header">
+  <img src="logo.png" alt="Aerofor" onerror="this.style.display='none'" />
+  <span id="header-title">Subdealers</span>
+  <div id="search-box">
+    <input id="search-input" type="text" placeholder="Municipio o código postal..." />
+    <button id="search-btn">Buscar</button>
+  </div>
+</div>
+
+<div id="map"></div>
+<div id="status-bar">Cargando mapa...</div>
+
+<script>
+// ─── CONFIGURACIÓN ────────────────────────────────────────────────────────────
+const SHEET_PROVINCIAS_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRiKjwi2HKafPqXg2VTxIiFQIGb4SNMbU_jl6AjyXwqM1TlewwnVyJaaQRkqijiVnVF94A2KFbJRfpl/pub?gid=0&single=true&output=csv';
+const SHEET_COMARCAS_URL   = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRiKjwi2HKafPqXg2VTxIiFQIGb4SNMbU_jl6AjyXwqM1TlewwnVyJaaQRkqijiVnVF94A2KFbJRfpl/pub?gid=1713307680&single=true&output=csv';
+
+const INITIAL_VIEW = { center: [40.4, -3.7], zoom: 5 };
+
+const COLOR = {
+  asignado:    { fill: '#4caf50', border: '#2e7d32' },
+  colindante:  { fill: '#ff9800', border: '#e65100' },
+  sin_asignar: { fill: '#f44336', border: '#b71c1c' },
+  comarca:     { fill: '#2196f3', border: '#0d47a1' },
+  neutro:      { fill: '#90a4ae', border: '#546e7a' }
+};
+
+// ─── TABLA DE EQUIVALENCIAS ──────────────────────────────────────────────────
+const EQUIV_PROVINCIAS = {
+  'A Coruña':               'La Coruña',
+  'Girona':                 'Gerona',
+  'Illes Balears':          'Islas Baleares',
+  'Ourense':                'Orense',
+  'Almeria':                'Almería',
+  'Castellón de la Plana':  'Castellón',
+  'Sta. Cruz de Tenerife':  'Santa Cruz de Tenerife'
+};
+
+const EQUIV_COMARCAS = {
+  'La Coruña':              'A Coruña',
+  'Gerona':                 'Girona',
+  'Islas Baleares':         'Illes Balears',
+  'Orense':                 'Ourense',
+  'Almería':                'Almeria',
+  'Castellón':              'Castellón de la Plana',
+  'Santa Cruz de Tenerife': 'Sta. Cruz de Tenerife'
+};
+
+function normProvincia(nombre) {
+  return EQUIV_PROVINCIAS[nombre] || nombre;
+}
+function normProvinciaComarca(nombre) {
+  return EQUIV_COMARCAS[nombre] || nombre;
+}
+
+// ─── ESTADO ───────────────────────────────────────────────────────────────────
+let datosProvincias = {};
+let datosComarcas   = {};
+let geojsonProvincias = null;
+let geojsonComarcas = null;
+let searchMarker = null;
+
+// ─── MAPA ─────────────────────────────────────────────────────────────────────
+const map = L.map('map').setView(INITIAL_VIEW.center, INITIAL_VIEW.zoom);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '© OpenStreetMap contributors', maxZoom: 18
+}).addTo(map);
+
+function setStatus(msg) { document.getElementById('status-bar').textContent = msg; }
+
+// ─── BOTÓN VOLVER A ESPAÑA ────────────────────────────────────────────────────
+const resetControl = L.control({ position: 'topleft' });
+resetControl.onAdd = () => {
+  const btn = L.DomUtil.create('button', 'reset-btn');
+  btn.textContent = '← España';
+  btn.title = 'Volver a la vista general';
+  L.DomEvent.on(btn, 'click', () => {
+    map.setView(INITIAL_VIEW.center, INITIAL_VIEW.zoom);
+    if (searchMarker) { map.removeLayer(searchMarker); searchMarker = null; }
+    setStatus('Mapa listo · Haz clic en cualquier punto o busca un municipio');
+  });
+  L.DomEvent.disableClickPropagation(btn);
+  return btn;
+};
+
+// ─── LEYENDA ──────────────────────────────────────────────────────────────────
+const legend = L.control({ position: 'bottomleft' });
+legend.onAdd = () => {
+  const div = L.DomUtil.create('div', 'legend');
+  div.innerHTML = `
+    <div class="legend-title">Subdealer</div>
+    <div class="legend-item"><div class="legend-color" style="background:${COLOR.asignado.fill}"></div>Asignado</div>
+    <div class="legend-item"><div class="legend-color" style="background:${COLOR.colindante.fill}"></div>Colindante</div>
+    <div class="legend-item"><div class="legend-color" style="background:${COLOR.sin_asignar.fill}"></div>Sin asignar</div>
+  `;
+  return div;
+};
+
+// ─── GEOCODIFICACIÓN INVERSA ──────────────────────────────────────────────────
+async function geocodificacionInversa(lat, lng) {
+  try {
+    const url = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&addressdetails=1`;
+    const res = await fetch(url, { headers: { 'Accept-Language': 'es' } });
+    const data = await res.json();
+    const addr = data.address || {};
+    const municipio = addr.city || addr.town || addr.village || addr.municipality || addr.county || '';
+    const cp = addr.postcode || '';
+    return { municipio, cp };
+  } catch(e) {
+    return { municipio: '', cp: '' };
+  }
+}
+
+// ─── DATOS SHEET ─────────────────────────────────────────────────────────────
+async function cargarDatosSheet() {
+  try {
+    const [resP, resC] = await Promise.all([
+      fetch(SHEET_PROVINCIAS_URL),
+      fetch(SHEET_COMARCAS_URL)
+    ]);
+    const csvP = await resP.text();
+    const csvC = await resC.text();
+
+    Papa.parse(csvP, {
+      header: true, skipEmptyLines: true,
+      complete: r => r.data.forEach(row => {
+        if (row.Provincia) {
+          if (!row.Subdealer?.trim()) row.Subdealer = '';
+          else if (row.Subdealer.trim().toLowerCase() === 'sin asignar') row.Subdealer = 'SIN_ASIGNAR';
+          datosProvincias[row.Provincia.trim()] = row;
+        }
+      })
+    });
+    Papa.parse(csvC, {
+      header: true, skipEmptyLines: true,
+      complete: r => r.data.forEach(row => {
+        if (row.Comarca) {
+          if (!row.Subdealer?.trim()) row.Subdealer = '';
+          else if (row.Subdealer.trim().toLowerCase() === 'sin asignar') row.Subdealer = 'SIN_ASIGNAR';
+          datosComarcas[row.Comarca.trim()] = row;
+        }
+      })
+    });
+    setStatus('Datos cargados');
+  } catch(e) {
+    setStatus('Error cargando Sheet');
+    console.error(e);
+  }
+}
+
+// ─── COLORES ──────────────────────────────────────────────────────────────────
+function getBBox(feature) {
+  const bb = turf.bbox(feature); // [minX, minY, maxX, maxY]
+  return bb;
+}
+
+function bboxOverlap(a, b) {
+  return a[0] <= b[2] && a[2] >= b[0] && a[1] <= b[3] && a[3] >= b[1];
+}
+
+function calcularColindantesComarcas(geojson) {
+  const asignadas = new Set();
+  geojson.features.forEach(f => {
+    const comarca   = f.properties['DS_COMARCA'];
+    const provincia = f.properties['DS_PROVINC'];
+    const dc = datosComarcas[comarca] || {};
+    const dp = datosProvincias[provincia] || datosProvincias[normProvincia(provincia)] || {};
+    const dpAlt = datosProvincias[normProvincia(provincia)] || datosProvincias[provincia] || {};
+    const subdealerC = dc.Subdealer?.trim();
+    const subdealerP = dp.Subdealer?.trim() || dpAlt.Subdealer?.trim();
+    const subdealer = subdealerC === 'SIN_ASIGNAR' ? '' :
+                      subdealerC ||
+                      (subdealerP === 'SIN_ASIGNAR' ? '' : subdealerP);
+    if (subdealer) asignadas.add(comarca);
+  });
+
+  // Pre-calcular bboxes una sola vez
+  const bboxMap = new Map();
+  geojson.features.forEach(f => {
+    bboxMap.set(f.properties['DS_COMARCA'], getBBox(f));
+  });
+
+  // Índice de features asignadas para no iterar todo el array
+  const featuresAsignadas = geojson.features.filter(f => asignadas.has(f.properties['DS_COMARCA']));
+
+  const colindantes = new Set();
+  geojson.features.forEach(f => {
+    const n = f.properties['DS_COMARCA'];
+    if (asignadas.has(n)) return;
+    const bbF = bboxMap.get(n);
+    for (const g of featuresAsignadas) {
+      const bbG = bboxMap.get(g.properties['DS_COMARCA']);
+      // Descartar sin cálculo geométrico si los bboxes no se solapan
+      if (!bboxOverlap(bbF, bbG)) continue;
+      try { if (turf.booleanIntersects(f, g)) { colindantes.add(n); break; } } catch(e) {}
+    }
+  });
+  return { asignadas, colindantes };
+}
+
+function colorComarca(comarca, asignadas, colindantes) {
+  if (asignadas.has(comarca))   return COLOR.asignado;
+  if (colindantes.has(comarca)) return COLOR.colindante;
+  return COLOR.sin_asignar;
+}
+
+// ─── POPUP ────────────────────────────────────────────────────────────────────
+function construirPopup(municipio, cp, provincia, comarca, comunidad) {
+  const d = datosProvincias[provincia] || datosProvincias[normProvincia(provincia)] || {};
+  const dc = comarca ? (datosComarcas[comarca] || {}) : {};
+  const subdealerComarca = dc.Subdealer?.trim();
+  const subdealerProvincia = d.Subdealer?.trim();
+  const subdealer = subdealerComarca === 'SIN_ASIGNAR' ? '' :
+                    subdealerComarca || 
+                    (subdealerProvincia === 'SIN_ASIGNAR' ? '' : subdealerProvincia);
+  const contacto  = subdealer ? (dc.Contacto?.trim()  || d.Contacto?.trim())  : '';
+  const telefono  = subdealer ? (dc.Teléfono?.trim()  || d.Teléfono?.trim())  : '';
+  const email     = subdealer ? (dc.Email?.trim()      || d.Email?.trim())     : '';
+
+  const tituloMunicipio = municipio || provincia;
+  const subtituloCP = cp ? `(${cp})` : '';
+
+  return `
+    <div class="popup-wrap">
+      <div class="popup-municipio">${tituloMunicipio} ${subtituloCP}</div>
+      <div class="popup-badge ${subdealer ? 'badge-asignado' : 'badge-sin-asignar'}">
+        ${subdealer ? '✓ Subdealer asignado' : '✗ Sin asignar'}
+      </div>
+      ${subdealer ? `
+        <div class="popup-field"><strong>${subdealer}</strong></div>
+        ${contacto ? `<div class="popup-field">${contacto}</div>` : ''}
+        ${telefono ? `<div class="popup-field"><a href="tel:${telefono}">📞 ${telefono}</a></div>` : ''}
+        ${email    ? `<div class="popup-field"><a href="mailto:${email}">✉️ ${email}</a></div>` : ''}
+      ` : '<div style="font-size:13px;color:#aaa;font-style:italic;margin-top:4px">Esta zona no tiene subdealer asignado todavía.</div>'}
+      <hr class="popup-divider">
+      <div class="popup-geo">
+        ${comarca ? `<strong>${comarca}</strong><br>` : ''}
+        ${comunidad || ''} ${provincia ? `(${provincia})` : ''}
+      </div>
+    </div>
+  `;
+}
+
+function buscarComarcaPorPunto(lat, lng) {
+  if (!geojsonComarcas) return null;
+  const point = turf.point([lng, lat]);
+  for (const f of geojsonComarcas.features) {
+    try {
+      if (turf.booleanPointInPolygon(point, f)) return f.properties;
+    } catch(e) {}
+  }
+  return null;
+}
+
+function buscarProvinciaPorPunto(lat, lng) {
+  if (!geojsonProvincias) return null;
+  const point = turf.point([lng, lat]);
+  for (const f of geojsonProvincias.features) {
+    try {
+      if (turf.booleanPointInPolygon(point, f)) return f.properties;
+    } catch(e) {}
+  }
+  return null;
+}
+
+// ─── CLIC EN MAPA ─────────────────────────────────────────────────────────────
+map.on('click', async function(e) {
+  const { lat, lng } = e.latlng;
+  setStatus('Identificando zona...');
+
+  const provProps = buscarProvinciaPorPunto(lat, lng);
+  if (!provProps) { setStatus('Clic fuera del territorio español'); return; }
+
+  const comarcaProps = buscarComarcaPorPunto(lat, lng);
+  const { municipio, cp } = await geocodificacionInversa(lat, lng);
+
+  const provincia  = provProps['Texto'] || '';
+  const comunidad  = provProps['CCAA']  || '';
+  const comarca    = comarcaProps ? comarcaProps['DS_COMARCA'] : '';
+
+  L.popup()
+    .setLatLng(e.latlng)
+    .setContent(construirPopup(municipio, cp, provincia, comarca, comunidad))
+    .openOn(map);
+
+  setStatus(`${municipio || provincia}${cp ? ' · ' + cp : ''} — ${provincia}`);
+});
+
+// ─── BÚSQUEDA ─────────────────────────────────────────────────────────────────
+async function buscar() {
+  const query = document.getElementById('search-input').value.trim();
+  if (!query) return;
+  setStatus(`Buscando "${query}"...`);
+  try {
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query + ', España')}&format=json&limit=1&countrycodes=es&addressdetails=1`,
+      { headers: { 'Accept-Language': 'es' } }
+    );
+    const data = await res.json();
+    if (!data.length) { setStatus('No encontrado'); return; }
+
+    const { lat, lon, address } = data[0];
+    const municipio = address?.city || address?.town || address?.village || address?.municipality || query;
+    const cp = address?.postcode || '';
+
+    map.setView([lat, lon], 11);
+    if (searchMarker) map.removeLayer(searchMarker);
+    searchMarker = L.marker([lat, lon]).addTo(map);
+
+    const provProps    = buscarProvinciaPorPunto(parseFloat(lat), parseFloat(lon));
+    const comarcaProps = buscarComarcaPorPunto(parseFloat(lat), parseFloat(lon));
+
+    const provincia = provProps?.['Texto'] || '';
+    const comunidad = provProps?.['CCAA']  || '';
+    const comarca   = comarcaProps?.['DS_COMARCA'] || '';
+
+    searchMarker
+      .bindPopup(construirPopup(municipio, cp, provincia, comarca, comunidad), { maxWidth: 300 })
+      .openPopup();
+
+    setStatus(`${municipio}${cp ? ' (' + cp + ')' : ''} — ${provincia}`);
+  } catch(e) {
+    setStatus('Error en la búsqueda');
+    console.error(e);
+  }
+}
+
+document.getElementById('search-btn').addEventListener('click', buscar);
+document.getElementById('search-input').addEventListener('keydown', e => { if (e.key === 'Enter') buscar(); });
+
+// ─── RENDERIZAR CAPAS ─────────────────────────────────────────────────────────
+function renderizarCapas(geoProv, geoComarc) {
+  const { asignadas, colindantes } = calcularColindantesComarcas(geoComarc);
+
+  const layerProvincias = L.geoJSON(geoProv, {
+    style: () => ({ fillColor: COLOR.neutro.fill, fillOpacity: 0.2, color: COLOR.neutro.border, weight: 1.2 }),
+    onEachFeature: (feature, layer) => {
+      layer.on('mouseover', () => layer.setStyle({ fillOpacity: 0.4 }));
+      layer.on('mouseout',  () => layer.setStyle({ fillOpacity: 0.2 }));
+    }
+  }).addTo(map);
+
+  const layerCobertura = L.geoJSON(geoComarc, {
+    style: feature => {
+      const comarca = feature.properties['DS_COMARCA'];
+      const c = colorComarca(comarca, asignadas, colindantes);
+      return { fillColor: c.fill, fillOpacity: 0.5, color: c.border, weight: 0.8 };
+    },
+    onEachFeature: (feature, layer) => {
+      layer.on('mouseover', () => layer.setStyle({ fillOpacity: 0.75 }));
+      layer.on('mouseout',  () => {
+        const comarca = feature.properties['DS_COMARCA'];
+        const c = colorComarca(comarca, asignadas, colindantes);
+        layer.setStyle({ fillColor: c.fill, fillOpacity: 0.5 });
+      });
+    }
+  }).addTo(map); // ← activa por defecto
+
+  const layerComarcas = L.geoJSON(geoComarc, {
+    style: () => ({ fillColor: COLOR.comarca.fill, fillOpacity: 0.1, color: COLOR.comarca.border, weight: 0.7, dashArray: '3 4' })
+  });
+
+  L.control.layers(null, {
+    'Provincial': layerProvincias,
+    'Cobertura comercial': layerCobertura,
+    'Comarcal': layerComarcas
+  }, { collapsed: true, position: 'topright' }).addTo(map);
+
+  resetControl.addTo(map);
+  legend.addTo(map);
+  setStatus('Mapa listo · Haz clic en cualquier punto o busca un municipio');
+}
+
+// ─── INIT ─────────────────────────────────────────────────────────────────────
+async function init() {
+  setStatus('Cargando datos...');
+  try {
+    const [resP, resC] = await Promise.all([
+      fetch('data/provincias_spain.geojson'),
+      fetch('data/comarcas-agrarias.geojson')
+    ]);
+    if (!resP.ok) throw new Error(`provincias_spain.geojson no encontrado (${resP.status})`);
+    if (!resC.ok) throw new Error(`comarcas-agrarias.geojson no encontrado (${resC.status})`);
+
+    geojsonProvincias = await resP.json();
+    geojsonComarcas   = await resC.json();
+
+    await cargarDatosSheet();
+    renderizarCapas(geojsonProvincias, geojsonComarcas);
+  } catch(e) {
+    setStatus(`Error: ${e.message}`);
+    console.error(e);
+  }
+}
+
+init();
+</script>
+</body>
+</html>
